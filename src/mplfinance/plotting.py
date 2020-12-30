@@ -45,7 +45,7 @@ from mplfinance._helpers import _list_of_dict
 from mplfinance._helpers import _num_or_seq_of_num
 from mplfinance._helpers import _adjust_color_brightness
 
-VALID_PMOVE_TYPES = ['renko', 'pnf']
+VALID_PMOVE_TYPES = ['wf','renko', 'pnf']
 
 DEFAULT_FIGRATIO = (8.00,5.75)
 
@@ -100,7 +100,7 @@ def _valid_plot_kwargs():
                                                                    and all(isinstance(c, str) for c in value) },
         'type'                      : { 'Default'     : 'ohlc',
                                         'Validator'   : lambda value: value in ('candle','candlestick','ohlc','ohlc_bars',
-                                                                                'line','renko','pnf') },
+                                                                                'line','renko','pnf','wf') },
  
         'style'                     : { 'Default'     : None,
                                         'Validator'   : _styles._valid_mpf_style },
@@ -110,6 +110,9 @@ def _valid_plot_kwargs():
  
         'mav'                       : { 'Default'     : None,
                                         'Validator'   : _mav_validator },
+
+        'wf_params'                 : { 'Default'     : dict(),
+                                        'Validator'   : lambda value: isinstance(value,dict) },
         
         'renko_params'              : { 'Default'     : dict(),
                                         'Validator'   : lambda value: isinstance(value,dict) },
@@ -383,6 +386,10 @@ def plot( data, **kwargs ):
         collections, new_dates, volumes, brick_values, size = collections
         formatter = IntegerIndexDateTimeFormatter(new_dates, fmtstring)
         xdates = np.arange(len(new_dates))
+    # TODO fix this for RENKO charts with no output 
+    if 1 > len(xdates): 
+        print ( xdates )
+        return None
 
     if collections is not None:
         for collection in collections:
@@ -400,7 +407,7 @@ def plot( data, **kwargs ):
     else:
         minx = xdates[0]  - (0.45 * avg_dist_between_points)
         maxx = xdates[-1] + (0.45 * avg_dist_between_points)
-
+    
     if len(xdates) == 1:  # kludge special case
         minx = minx - 0.75
         maxx = maxx + 0.75

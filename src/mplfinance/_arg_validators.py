@@ -43,7 +43,22 @@ def _check_and_prepare_data(data, config):
     if config['tz_localize']:
         dates   = mdates.date2num(data.index.tz_localize(None).to_pydatetime())
     else:  # Just in case someone was depending on this bug (Issue 236)
+        # https://matplotlib.org/3.3.3/api/dates_api.html
+        # print ( data.index )
+        # DatetimeIndex(['2020-12-18 20:56:45', '2020-12-18 20:59:17',
+        #                '2020-12-18 21:01:12'],
+        #               dtype='datetime64[ns]', name='DT', freq=None)
+        # print ( data.index.to_pydatetime() )
+        # [datetime.datetime(2020, 12, 18, 20, 56, 45)
+        #  datetime.datetime(2020, 12, 18, 20, 59, 17)
+        #  datetime.datetime(2020, 12, 18, 21, 1, 12)]
         dates   = mdates.date2num(data.index.to_pydatetime())
+        # print ( dates )
+        # [18614.87274306 18614.87450231 18614.87583333]
+        # import matplotlib.dates  as mdates
+        # mdates.num2date(18614.87274306)
+        # Out[214]: datetime.datetime(2020, 12, 18, 20, 56, 45, 384, tzinfo=datetime.timezone.utc)
+       
     opens   = data[o].values
     highs   = data[h].values
     lows    = data[l].values

@@ -70,6 +70,11 @@ def _construct_mpf_collections(ptype,dates,xdates,opens,highs,lows,closes,volume
     elif ptype == 'ohlc' or ptype == 'bars' or ptype == 'ohlc_bars':
         collections = _construct_ohlc_collections(xdates, opens, highs, lows, closes,
                                                   marketcolors=style['marketcolors'],config=config )
+
+    elif ptype == 'wf':
+        collections = _construct_wf_collections(
+            dates,opens,highs,lows,closes,volumes, config['wf_params'], marketcolors=style['marketcolors'])
+
     elif ptype == 'renko':
         collections = _construct_renko_collections(
             dates, highs, lows, volumes, config['renko_params'], closes, marketcolors=style['marketcolors'])
@@ -214,6 +219,29 @@ def _convert_segment_dates(segments,dtindex):
             new_line.append((date,value))
         converted.append(new_line)
     return converted
+
+def _valid_wf_kwargs():
+    '''
+    Construct and return the "valid renko kwargs table" for the mplfinance.plot(type='renko') 
+    function. A valid kwargs table is a `dict` of `dict`s. The keys of the outer dict are 
+    the valid key-words for the function.  The value for each key is a dict containing 2 
+    specific keys: "Default", and "Validator" with the following values:
+        "Default"      - The default value for the kwarg if none is specified.
+        "Validator"    - A function that takes the caller specified value for the kwarg,
+                         and validates that it is the correct type, and (for kwargs with 
+                         a limited set of allowed values) may also validate that the
+                         kwarg value is one of the allowed values.
+    '''
+    vkwargs = {
+        'brick_size'  : { 'Default'     : 'atr',
+                          'Validator'   : lambda value: isinstance(value,(float,int)) or value == 'atr' },
+        'atr_length'  : { 'Default'     : 14,
+                          'Validator'   : lambda value: isinstance(value,int) or value == 'total' },               
+    }
+
+    _validate_vkwargs_dict(vkwargs)
+
+    return vkwargs
 
 def _valid_renko_kwargs():
     '''
@@ -470,6 +498,201 @@ def _construct_candlestick_collections(dates, opens, highs, lows, closes, market
                                    )
 
     return [rangeCollection, barCollection]
+
+import io
+def sprintf( fmt, *args):
+    
+    buf = io.StringIO()
+    buf.write(fmt % args)
+    return buf.getvalue()
+
+
+
+def _construct_wf_collections(dates, opens,highs,lows,closes,volumes, config_wf_params, marketcolors=None):
+    """Represent the price change with bricks
+
+    NOTE: this code assumes if any value open, low, high, close is
+    missing they all are missing
+
+    Algorithm Explanation
+    ---------------------
+    In the first part of the algorithm, we populate the cdiff array
+    along with adjusting the dates and volumes arrays into the new_dates and
+    new_volumes arrays. A single date includes a range from no bricks to many 
+    bricks, if a date has no bricks it shall not be included in new_dates, 
+    and if it has n bricks then it will be included n times. Volumes use a 
+    volume cache to save volume amounts for dates that do not have any bricks
+    before adding the cache to the next date that has at least one brick.
+    We populate the cdiff array with each close values difference from the 
+    previously created brick divided by the brick size.
+
+    In the second part of the algorithm, we iterate through the values in cdiff
+    and add 1s or -1s to the bricks array depending on whether the value is 
+    positive or negative. Every time there is a trend change (ex. previous brick is
+    an upbrick, current brick is a down brick) we draw one less brick to account
+    for the price having to move the previous bricks amount before creating a 
+    brick in the opposite direction.
+
+    In the final part of the algorithm, we enumerate through the bricks array and
+    assign up-colors or down-colors to the associated index in the color array and
+    populate the verts list with each bricks vertice to be used to create the matplotlib
+    PolyCollection.
+
+    Useful sources:
+    https://avilpage.com/2018/01/how-to-plot-renko-charts-with-python.html
+    https://school.stockcharts.com/doku.php?id=chart_analysis:renko
+    
+    Parameters
+    ----------
+    dates : sequence
+        sequence of dates
+    highs : sequence
+        sequence of high values
+    lows : sequence
+        sequence of low values
+    config_renko_params : kwargs table (dictionary)
+        brick_size : size of each brick
+        atr_length : length of time used for calculating atr
+    closes : sequence
+        sequence of closing values
+    marketcolors : dict of colors: up, down, edge, wick, alpha
+
+    Returns
+    -------
+    ret : list
+        rectCollection
+    """
+    wf_params = _process_kwargs(config_wf_params, _valid_wf_kwargs())
+    if marketcolors is None:
+        marketcolors = _get_mpfstyle('classic')['marketcolors']
+        #print('default market colors:',marketcolors)
+    
+    brick_size = wf_params['brick_size']
+    atr_length = wf_params['atr_length']
+    
+    lendata = len(closes)
+    
+
+    if brick_size == 'atr':
+        if atr_length == 'total':
+            brick_size = _calculate_atr(lendata-1, highs, lows, closes)
+        else:
+            brick_size = _calculate_atr(atr_length, highs, lows, closes)
+    else: # is an integer or float
+        upper_limit = (max(closes) - min(closes)) / 2
+        lower_limit = 0.01 * _calculate_atr(len(closes)-1, highs, lows, closes)
+        if brick_size > upper_limit:
+            raise ValueError("Specified brick_size may not be larger than (50% of the close price range of the dataset) which has value: "+ str(upper_limit))
+        elif brick_size < lower_limit:
+            raise ValueError("Specified brick_size may not be smaller than (0.01* the Average True Value of the dataset) which has value: "+ str(lower_limit))
+
+    alpha  = marketcolors['alpha']
+
+    nc     = mcolors.to_rgba('w', alpha)
+    enc    = mcolors.to_rgba('w', 1.0)
+
+    uc     = mcolors.to_rgba(marketcolors['candle'][ 'up' ], alpha)
+    dc     = mcolors.to_rgba(marketcolors['candle']['down'], alpha)
+    euc    = mcolors.to_rgba(marketcolors['edge'][ 'up' ], 1.0)
+    edc    = mcolors.to_rgba(marketcolors['edge']['down'], 1.0)
+    
+    cdiff = [] # holds the differences between each close and the previously created brick / the brick size
+    prev_close_brick = closes[0]
+    volume_cache = 0 # holds the volumes for the dates that were skipped
+    new_dates = [] # holds the dates corresponding with the index
+    new_volumes = [] # holds the volumes corresponding with the index.  If more than one index for the same day then they all have the same volume.
+
+    print( sprintf("lendata: %d brick_size: %d  CLOSES: ", lendata, int(brick_size)) )
+    print( closes )
+    
+    for i in range(lendata):
+        brick_diff = int((closes[i] - prev_close_brick) / brick_size)
+        if brick_diff == 0:
+            if volumes is not None:
+                volume_cache += volumes[i]
+        cdiff.extend([brick_diff])
+        #print( sprintf("i: %d brick_diff: %d closes[i]: %d prev_close_brick %d", i, brick_diff, closes[i], prev_close_brick) )
+            
+        if volumes is not None:
+            new_volumes.extend([volumes[i] + volume_cache] * abs(brick_diff))
+            volume_cache = 0
+        new_dates.extend([dates[i]] )
+        prev_close_brick += brick_diff *brick_size
+
+    lencdiff = len(cdiff)
+    print( sprintf("lencdiff: %d CDIFF: ", lencdiff) )
+    print( cdiff )
+    print( " ") #  \n
+    if lendata != lencdiff:
+        raise ValueError( sprintf("ERROR: lendata[%d] != lencdiff[%d]: ", lendata, lencdiff) )
+
+    lennew_dates = len(new_dates)
+    #print( sprintf("lennew_dates: %d NEW_DATES: ", lennew_dates) )
+    #print( new_dates )
+    if lendata != lennew_dates:
+        raise ValueError( sprintf("ERROR: lendata[%d] != lennew_dates[%d]: ", lendata, lennew_dates) )
+
+
+    curr_price = closes[0]
+    verts = [] # holds the brick vertices
+    colors = [] # holds the facecolors for each brick
+    edge_colors = [] # holds the edgecolors for each brick
+    brick_values = [] # holds the brick values for each brick
+    for index, number in enumerate(cdiff):
+        
+        if number == 0: # zero brick
+            colors.append(nc)
+            edge_colors.append(enc)
+        elif number > 0: # up brick
+            colors.append(uc)
+            edge_colors.append(euc)
+        elif number < 0: # down brick
+            colors.append(dc)
+            edge_colors.append(edc)
+        
+        curr_price += (brick_size * number)
+        brick_values.append(curr_price)
+        
+        #x, y = index, curr_price
+        x = index
+        #print( index, number )
+        y1 = closes[index]
+        y2 = opens [index]
+        verts.append((
+            (x,   y1),
+            (x,   y2),
+            (x+1, y2),
+            (x+1, y1)))
+
+        # x, y = index, curr_price
+        # verts.append((
+        #     (x, y),
+        #     (x, y+brick_size),
+        #     (x+1, y+brick_size),
+        #     (x+1, y)))
+
+    #print( new_dates )
+    lenbrick_values = len(brick_values)
+    #print( sprintf("lenbrick_values: %d brick_values: ", lenbrick_values) )
+    #print( brick_values )
+    if lendata != lenbrick_values:
+        raise ValueError( sprintf("ERROR: lendata[%d] != lenbrick_values[%d]: ", lendata, lenbrick_values) )
+    
+
+    useAA = 0,    # use tuple here
+    lw = None
+    rectCollection = PolyCollection(verts,
+                                    facecolors=colors,
+                                    antialiaseds=useAA,
+                                    edgecolors=edge_colors,
+                                    linewidths=lw
+                                    )
+
+    return [rectCollection,], new_dates, new_volumes, brick_values, brick_size
+
+
+
+
 
 def _construct_renko_collections(dates, highs, lows, volumes, config_renko_params, closes, marketcolors=None):
     """Represent the price change with bricks
